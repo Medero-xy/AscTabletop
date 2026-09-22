@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Jujutsu VTT - Tela do Jogo</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; }
+        canvas { display: block; }
+        #ui_hud { position: absolute; top: 10px; left: 10px; color: #00ff88; font-family: Arial; font-weight: bold;}
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+    <div id="ui_hud">Jujutsu Kaisen VTT (Espectador)</div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+
+        // CENA
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const gridHelper = new THREE.GridHelper(50, 50, 0x8a2be2, 0x444444);
+        scene.add(gridHelper);
+
+        // GRUPO DO TOKEN (Igual ao mestre)
+        const tokenGroup = new THREE.Group();
+        tokenGroup.position.y = 1;
+        scene.add(tokenGroup);
+
+        let tokenSprite;
+        const textureLoader = new THREE.TextureLoader();
+        textureLoader.load('/img/token_teste.png', (tex) => {
+            const alturaAlvo = 2;
+            const ratio = tex.image.width / tex.image.height;
+            const spriteMaterial = new THREE.SpriteMaterial({ map: tex, transparent: true });
+            
+            tokenSprite = new THREE.Sprite(spriteMaterial);
+            tokenSprite.scale.set(alturaAlvo * ratio, alturaAlvo, 1);
+            tokenGroup.add(tokenSprite);
+        });
+
+        // CÂMERA
+        camera.position.set(0, 5, 10);
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true; 
+
+        // RECEBE DO MESTRE
+        socket.on('token_movido', (dados) => {
+            tokenGroup.position.x = dados.x;
+            tokenGroup.position.z = dados.y;
+        });
+
+        socket.on('token_flip', () => {
+            if(tokenSprite) tokenSprite.scale.x *= -1;
+        });
+
+        // LOOP
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update(); 
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+        });
+    </script>
+</body>
+</html>

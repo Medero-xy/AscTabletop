@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Jujutsu VTT - Mestre (Token 2.5D)</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: Arial; background-color: #111;}
+        canvas { display: block; width: 100vw; height: 100vh; }
+        #ui { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.8); padding: 15px; color: #00ff88; z-index: 10; pointer-events: none;}
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+    <div id="ui">
+        <h3>Mestre: Token 2.5D Definitivo</h3>
+        <p>1. Clique esquerdo na imagem para selecionar (Caixa vermelha)</p>
+        <p>2. Segure e arraste (Sobe nas rampas perfeitamente)</p>
+        <p>3. WASD / Tecla F para Inverter</p>
+        <div id="status">Aguardando...</div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+
+        // 1. CENA BASE E CÂMERA
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        camera.position.set(0, 5, 10);
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+
+        const gridHelper = new THREE.GridHelper(50, 50, 0x8a2be2, 0x444444);
+        scene.add(gridHelper);
+
+        // 2. MAPA FÍSICO COM RELEVO
+        const mapaFisico = []; 
+        
+        // Chão principal
+        const chao = new THREE.Mesh(new THREE.BoxGeometry(20, 0.5, 20), new THREE.MeshBasicMaterial({ color: 0x444444 }));
+        chao.position.y = -0.25;
+        scene.add(chao);
+        mapaFisico.push(chao);
+
+        // Rampa
+        const rampa = new THREE.Mesh(new THREE.BoxGeometry(5, 0.5, 10), new THREE.MeshBasicMaterial({ color: 0x8a2be2 }));
+        rampa.position.set(4, 1.5, 0);
+        rampa.rotation.z = Math.PI / 8;
+        scene.add(rampa);
+        mapaFisico.push(rampa);
+
+        // Platô alto
+        const plato = new THREE.Mesh(new THREE.BoxGeometry(5, 4, 10), new THREE.MeshBasicMaterial({ color: 0x00ff88 }));
+        plato.position.set(8.5, 1.5, 0);
+        scene.add(plato);
+        mapaFisico.push(plato);
+
+
+        // 3. O TOKEN 2.5D (GRUPO + HITBOX VERMELHA + ARTE PAPELÃO)
+        const tokenGroup = new THREE.Group();
+        tokenGroup.position.set(0, 0, 0); // Pés começam no nível 0
+        scene.add(tokenGroup);
+
+        // Hitbox Invisível (fica visível e vermelha ao selecionar)
+        const hitboxMat = new THREE.MeshBasicMaterial({ 
+            color: 0xff0000, 
+            wireframe: true, 
+            visible: false 
+        });
+        // Criamos com um tamanho básico, ele vai atualizar quando a imagem carregar
+        const tokenHitbox = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 0.5), hitboxMat);
+        tokenGroup.add(tokenHitbox);
+
+        // A Arte (Carregando a textura do PNG)
+        let tokenArte;
+        new THREE.TextureLoader().load('/img/token_teste.png', (tex) => {
+            const altura = 2.5; 
+            const largura = altura * (tex.image.width / tex.image.height);
+            
+            // Permite o "Flip" de textura
+            tex.wrapS = THREE.RepeatWrapping;
+
+            // DoubleSide garante que vejamos a imagem das costas também
+            // alphaTest: 0.1 joga fora os pixels transparentes para não borrar com outras texturas
+            const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide, alphaTest: 0.1 });
+            
+            tokenArte = new THREE.Mesh(new THREE.PlaneGeometry(largura, altura), mat);
+            // Eleva a arte para os pés encostarem no Y=0
+            tokenArte.geometry.translate(0, altura / 2, 0);
+            tokenGroup.add(tokenArte);
+            
+            // Ajusta a Hitbox para ser do tamanho exato da arte carregada e "levanta" ela também
+            tokenHitbox.geometry.dispose();
+            tokenHitbox.geometry = new THREE.BoxGeometry(largura, altura, 0.5);
+            tokenHitbox.geometry.translate(0, altura / 2, 0);
+        });
+
+
+        // 4. VARIÁVEIS DE INTERAÇÃO
+        const raycasterMouse = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        
+        let tokenSelecionado = false;
+        let isDragging = false;
+        const keys = {};
+
+        const statusDiv = document.getElementById('status');
+        
+        const dragPlane = new THREE.Plane();
+        const planeNormal = new THREE.Vector3(0, 1, 0);
+        const offset = new THREE.Vector3();
+        const intersection = new THREE.Vector3();
+
+        // 5. TECLAS E ATALHOS (INCLUINDO O NOVO FLIP)
+        document.addEventListener('keydown', (e) => { 
+            keys[e.code] = true; 
+            
+            // FLIP (Tecla F)
+            if (e.code === 'KeyF' && tokenSelecionado && tokenArte) {
+                tokenArte.material.map.repeat.x *= -1; 
+                socket.emit('token_flip', {});
+            }
+        });
+        document.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+
+        // 6. MOUSE DOWN (CLICAR)
+        function atualizarMouse(e) {
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ( ( e.clientX - rect.left ) / rect.width ) * 2 - 1;
+            mouse.y = - ( ( e.clientY - rect.top ) / rect.height ) * 2 + 1;
+        }
+
+        renderer.domElement.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0) return;
+            atualizarMouse(e);
+            raycasterMouse.setFromCamera(mouse, camera);
+
+            // Tenta clicar sempre na Hitbox, não na arte
+            const intersects = raycasterMouse.intersectObject(tokenHitbox);
+
+            if (intersects.length > 0) {
+                tokenSelecionado = true;
+                isDragging = true;
+                controls.enabled = false;
+                
+                hitboxMat.visible = true; // Mostra a caixa vermelha
+                statusDiv.innerText = "Token SELECIONADO!";
+                statusDiv.style.color = "#ff0000";
+
+                dragPlane.setFromNormalAndCoplanarPoint(planeNormal, tokenGroup.position);
+                raycasterMouse.ray.intersectPlane(dragPlane, intersection);
+                offset.copy(intersection).sub(tokenGroup.position);
+            } else {
+                tokenSelecionado = false;
+                
+                hitboxMat.visible = false; // Esconde a caixa vermelha
+                statusDiv.innerText = "Desselecionado";
+                statusDiv.style.color = "#ffffff";
+            }
+        });
+
+        // 7. MOUSE MOVE (ARRASTAR)
+        window.addEventListener('pointermove', (e) => {
+            if (!isDragging) return;
+            atualizarMouse(e);
+            raycasterMouse.setFromCamera(mouse, camera);
+
+            const colisoesMapa = raycasterMouse.intersectObjects(mapaFisico);
+
+            if (colisoesMapa.length > 0) {
+                // Ao arrastar pra cima do mapa físico, ele cola os pés (Y) na altura exata da colisão
+                tokenGroup.position.copy(colisoesMapa[0].point);
+            } else {
+                // Se o mouse estiver fora do mapa (no vazio espacial)
+                raycasterMouse.ray.intersectPlane(dragPlane, intersection);
+                tokenGroup.position.copy(intersection.sub(offset));
+            }
+
+            socket.emit('mover_token', { x: tokenGroup.position.x, y: tokenGroup.position.z });
+        });
+
+        window.addEventListener('pointerup', () => {
+            if (isDragging) {
+                isDragging = false;
+                controls.enabled = true;
+            }
+        });
+
+        // 8. LOOP E ANIMAÇÃO
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // A. BILLBOARDING Y-FIXO (A arte vira pro rosto da câmera)
+            if (tokenArte) {
+                tokenArte.rotation.y = Math.atan2( ( camera.position.x - tokenGroup.position.x ), ( camera.position.z - tokenGroup.position.z ) );
+            }
+
+            // B. WASD (Movimento relativo à câmera)
+            if (tokenSelecionado && !isDragging) {
+                const speed = 0.15;
+                let moved = false;
+                
+                const direcaoCamera = new THREE.Vector3();
+                camera.getWorldDirection(direcaoCamera);
+                direcaoCamera.y = 0; 
+                direcaoCamera.normalize();
+
+                const frente = direcaoCamera.clone();
+                const lado = new THREE.Vector3().crossVectors(direcaoCamera, new THREE.Vector3(0, 1, 0)).normalize();
+
+                const oldPos = tokenGroup.position.clone();
+
+                if (keys['KeyW']) { tokenGroup.position.addScaledVector(frente, speed); moved = true; }
+                if (keys['KeyS']) { tokenGroup.position.addScaledVector(frente, -speed); moved = true; }
+                if (keys['KeyD']) { tokenGroup.position.addScaledVector(lado, speed); moved = true; }
+                if (keys['KeyA']) { tokenGroup.position.addScaledVector(lado, -speed); moved = true; }
+
+                if (moved) {
+                    // Gravidade do WASD (O raio agora desce a partir da altura 100 para sempre achar o chão)
+                    const rayBaixo = new THREE.Raycaster(
+                        new THREE.Vector3(tokenGroup.position.x, 100, tokenGroup.position.z), 
+                        new THREE.Vector3(0, -1, 0)
+                    );
+                    const colisoesMapa = rayBaixo.intersectObjects(mapaFisico);
+                    
+                    if (colisoesMapa.length > 0) {
+                        tokenGroup.position.y = colisoesMapa[0].point.y; // Pés exatamente no chão!
+                    } else {
+                        tokenGroup.position.copy(oldPos); 
+                    }
+                    socket.emit('mover_token', { x: tokenGroup.position.x, y: tokenGroup.position.z });
+                }
+            }
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>
